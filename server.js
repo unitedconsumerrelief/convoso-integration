@@ -110,7 +110,7 @@ app.post("/convoso/call-completed", async (req, res) => {
       notes,
       duration,
       event_id: 0,
-      recording_url: req.body.recording_url || ""
+      ...(req.body.recording_url ? { recording_url: req.body.recording_url } : {})
       // dialer_id omitted (Convoso not listed)
     });
 
@@ -161,7 +161,7 @@ app.post("/convoso/disposition-set", async (req, res) => {
       notes,
       duration: "00:00:00",
       event_id: 0,
-      recording_url: req.body.recording_url || ""
+      ...(req.body.recording_url ? { recording_url: req.body.recording_url } : {})
     });
 
     return res.status(200).json({ ok: true, forth: create.body });
