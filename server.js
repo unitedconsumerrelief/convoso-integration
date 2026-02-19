@@ -121,6 +121,18 @@ app.post("/convoso/call-completed", async (req, res) => {
 });
 
 /**
+ * POST /convoso/disposition — stub route (same auth as call-completed).
+ */
+app.post("/convoso/disposition", (req, res) => {
+  if (!requireSecret(req, res)) return;
+  try {
+    return res.status(200).json({ ok: true, route: "convoso/disposition" });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+/**
  * Convoso -> Forth
  * Create 1 log on Disposition Set (only once when first set)
  * We rely on Convoso config to only fire when blank -> value (your choice).
