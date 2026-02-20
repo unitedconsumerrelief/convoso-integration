@@ -118,6 +118,10 @@ app.post("/convoso/call-completed", async (req, res) => {
     // You’ll map these fields from Convoso later. For now we accept flexible keys.
     const convoso = parseConvosoBody(req);
     logConvosoRequest("call-completed", convoso);
+    console.log("[call-completed] payload_keys=" + JSON.stringify(Object.keys(convoso).sort()));
+    if (typeof convoso.params === "object" && convoso.params !== null) {
+      console.log("[call-completed] params_keys=" + JSON.stringify(Object.keys(convoso.params).sort()));
+    }
     const phone = convoso.phone;
     if (!phone) return res.status(400).json({ ok: false, error: "Missing phone" });
 
