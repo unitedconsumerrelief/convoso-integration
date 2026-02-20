@@ -21,6 +21,17 @@ const DISP = {
   BUSY: 6
 };
 
+// First-disposition dedupe: key = call_id or "lead_id|call_start_ts", value = { ts, disposition_id }. TTL 30 days.
+const firstDispositionSeen = new Map();
+const FIRST_DISPOSITION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+function pruneFirstDispositionSeen() {
+  const now = Date.now();
+  for (const [k, v] of firstDispositionSeen.entries()) {
+    if (now - v.ts > FIRST_DISPOSITION_TTL_MS) firstDispositionSeen.delete(k);
+  }
+}
+
 function normalizePhone(raw) {
   if (!raw) return "";
   // keep digits only
@@ -121,12 +132,63 @@ app.post("/convoso/call-completed", async (req, res) => {
 });
 
 /**
- * POST /convoso/disposition — stub route (same auth as call-completed).
+ * POST /convoso/disposition — first disposition only; deduped by call_id or lead_id + call start ts.
  */
-app.post("/convoso/disposition", (req, res) => {
+app.post("/convoso/disposition", async (req, res) => {
   if (!requireSecret(req, res)) return;
+
   try {
-    return res.status(200).json({ ok: true, route: "convoso/disposition" });
+    const disposition = (req.body.disposition ?? req.body.disposition_name ?? "").toString().trim();
+    if (!disposition) return res.status(200).json({ ok: true, skipped: "Disposition blank" });
+
+    const callId = req.body.call_id != null ? String(req.body.call_id) : null;
+    const leadId = req.body.lead_id != null ? String(req.body.lead_id) : "";
+    const callStartTs = req.body.call_start_time ?? req.body.start_time ?? req.body.created_at ?? "";
+    const dedupeKey = callId || `${leadId}|${callStartTs}`;
+
+    pruneFirstDispositionSeen();
+    if (firstDispositionSeen.has(dedupeKey)) {
+      return res.status(200).json({ ok: true, skipped: "Disposition already processed", deduped: true });
+    }
+
+    const rawPhone = req.body.phone || req.body.phone_number || req.body.caller_id || req.body.lead_phone;
+    const phone = normalizePhone(rawPhone);
+    if (!phone) return res.status(400).json({ ok: false, error: "Missing phone" });
+
+    const search = await forthSearchContactByPhone(phone);
+    const contact = search?.body?.response?.[0];
+    if (!contact?.id) return res.status(200).json({ ok: true, skipped: "No matching contact in Forth" });
+
+    const direction = (req.body.direction || req.body.call_type || "Incoming").toLowerCase().includes("out")
+      ? "Outgoing"
+      : "Incoming";
+
+    const dispId =
+      /no answer|na/i.test(disposition) ? DISP.NO_ANSWER :
+      /busy/i.test(disposition) ? DISP.BUSY :
+      /left|vm|voicemail|message/i.test(disposition) ? DISP.LEFT_MESSAGE :
+      DISP.CONNECTED;
+
+    const createdAt = req.body.created_at || new Date().toISOString().slice(0, 19).replace("T", " ");
+    const notes = `Convoso - Disposition: ${disposition} | phone=${phone}`;
+
+    await forthCreateCall({
+      contactID: Number(contact.id),
+      created_at: createdAt,
+      call_type: direction,
+      call_disposition: dispId,
+      notes,
+      duration: "00:00:00",
+      event_id: 0,
+      ...(req.body.recording_url ? { recording_url: req.body.recording_url } : {})
+    });
+
+    firstDispositionSeen.set(dedupeKey, {
+      ts: Date.now(),
+      disposition_id: req.body.disposition_id ?? req.body.id ?? ""
+    });
+
+    return res.status(200).json({ ok: true, created: true });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
   }
