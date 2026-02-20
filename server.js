@@ -137,15 +137,21 @@ function formatConvosoTime(date) {
 
 /**
  * Fetch Convoso Call Log for phone; returns best matching log entry or null on failure/no data.
+ * Uses process.env.CONVOSO_AUTH_TOKEN at request time.
  */
 async function fetchConvosoCallLog(phone) {
-  if (!CONVOSO_AUTH_TOKEN || !phone) return null;
+  const authToken = process.env.CONVOSO_AUTH_TOKEN;
+  if (!authToken || !authToken.trim()) {
+    console.log("[call-completed] enrichment skipped: missing CONVOSO_AUTH_TOKEN");
+    return null;
+  }
+  if (!phone) return null;
   const now = new Date();
   const start = new Date(now.getTime() - 10 * 60 * 1000);
   const end = new Date(now.getTime() + 2 * 60 * 1000);
   const params = new URLSearchParams({
-    auth_token: CONVOSO_AUTH_TOKEN,
-    phone_number: phone,
+    auth_token: authToken,
+    phone_number: String(phone),
     start_time: formatConvosoTime(start),
     end_time: formatConvosoTime(end),
     order: "desc",
@@ -156,6 +162,10 @@ async function fetchConvosoCallLog(phone) {
   try {
     const r = await fetch(url, { method: "GET" });
     const j = await r.json();
+    if (!r.ok) {
+      console.log("[call-completed] enrichment fetch fail: HTTP " + r.status + " " + (j?.message ?? j?.error ?? ""));
+      return null;
+    }
     const list = j?.data ?? j?.logs ?? Array.isArray(j) ? j : [];
     if (!Array.isArray(list) || list.length === 0) return null;
     const nowTs = now.getTime();
@@ -167,7 +177,7 @@ async function fetchConvosoCallLog(phone) {
     withDiff.sort((a, b) => a.diff - b.diff);
     return withDiff[0].entry;
   } catch (e) {
-    console.log("[call-completed] Convoso Call Log fetch failed: " + (e?.message ?? String(e)));
+    console.log("[call-completed] enrichment fetch fail: " + (e?.message ?? String(e)));
     return null;
   }
 }
@@ -214,6 +224,10 @@ app.post("/convoso/call-completed", async (req, res) => {
     const phone = convoso.phone;
     if (!phone) return res.status(400).json({ ok: false, error: "Missing phone" });
 
+    if (process.env.CONVOSO_AUTH_TOKEN) {
+      const last4 = phone.length >= 4 ? phone.slice(-4) : "????";
+      console.log("[call-completed] enrichment fetching convoso for phone_last4=" + last4);
+    }
     const convosoLog = await fetchConvosoCallLog(phone);
     let direction;
     let notes;
