@@ -147,14 +147,17 @@ async function fetchConvosoCallLog(phone) {
     return null;
   }
   if (!phone) return null;
+  const phoneDigits = String(phone).replace(/\D/g, "");
   const params = new URLSearchParams({
     auth_token: authToken,
-    phone_number: String(phone),
+    phone_number: phoneDigits,
     order: "desc",
     limit: "5",
     include_recordings: "0"
   });
   const url = `${CONVOSO_API_BASE}/v1/log/retrieve?${params.toString()}`;
+  const last10 = phoneDigits.length >= 10 ? phoneDigits.slice(-10) : phoneDigits;
+  console.log("[call-completed] enrichment query phone_digits_len=" + phoneDigits.length + " phone_last10=" + last10);
   const timeoutMs = 8000;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
