@@ -159,15 +159,22 @@ async function fetchConvosoCallLog(phone) {
     include_recordings: "0"
   });
   const url = `${CONVOSO_API_BASE}/v1/log/retrieve?${params.toString()}`;
+  const timeoutMs = 8000;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const r = await fetch(url, { method: "GET" });
+    const r = await fetch(url, { method: "GET", signal: controller.signal });
+    clearTimeout(timeoutId);
     const j = await r.json();
     if (!r.ok) {
       console.log("[call-completed] enrichment fetch fail: HTTP " + r.status + " " + (j?.message ?? j?.error ?? ""));
       return null;
     }
     const list = j?.data ?? j?.logs ?? Array.isArray(j) ? j : [];
-    if (!Array.isArray(list) || list.length === 0) return null;
+    if (!Array.isArray(list) || list.length === 0) {
+      console.log("[call-completed] enrichment fetch fail: no results");
+      return null;
+    }
     const nowTs = now.getTime();
     const withDiff = list.map((entry) => {
       const dateStr = entry.call_date ?? entry.call_date_time ?? entry.date ?? "";
@@ -177,7 +184,9 @@ async function fetchConvosoCallLog(phone) {
     withDiff.sort((a, b) => a.diff - b.diff);
     return withDiff[0].entry;
   } catch (e) {
-    console.log("[call-completed] enrichment fetch fail: " + (e?.message ?? String(e)));
+    clearTimeout(timeoutId);
+    const msg = e?.name === "AbortError" ? "timeout (" + timeoutMs + "ms)" : (e?.message ?? String(e));
+    console.log("[call-completed] enrichment fetch fail: " + msg);
     return null;
   }
 }
