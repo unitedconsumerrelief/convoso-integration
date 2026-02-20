@@ -1,4 +1,5 @@
 const express = require("express");
+const querystring = require("querystring");
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -39,6 +40,29 @@ function normalizePhone(raw) {
   // if 11 digits starting with 1, drop leading 1
   if (d.length === 11 && d.startsWith("1")) return d.slice(1);
   return d;
+}
+
+/**
+ * Parse Convoso body: support direct JSON or req.body.params (x-www-form-urlencoded string).
+ * Returns { ...parsedFields, phone } where phone is normalized for lookup (digits).
+ */
+function parseConvosoBody(req) {
+  const body = req.body || {};
+  if (typeof body.params === "string") {
+    const parsed = querystring.parse(body.params);
+    const phoneNumber = parsed.phone_number ?? parsed.phone ?? "";
+    const phoneCode = String(parsed.phone_code ?? "").trim();
+    const digits = normalizePhone(phoneNumber);
+    const normalizedPhone = digits;
+    const phoneE164 = phoneCode && digits ? `+${phoneCode}${digits}` : null;
+    const convoso = { ...parsed, phone: normalizedPhone, phone_number: phoneNumber, phone_code: phoneCode, phoneE164 };
+    console.log("[convoso] input=params", convoso.call_id != null ? `call_id=${convoso.call_id}` : "", convoso.lead_id != null ? `lead_id=${convoso.lead_id}` : "");
+    return convoso;
+  }
+  const rawPhone = body.phone || body.phone_number || body.caller_id || body.lead_phone;
+  const convoso = { ...body, phone: normalizePhone(rawPhone) };
+  console.log("[convoso] input=json", convoso.call_id != null ? `call_id=${convoso.call_id}` : "", convoso.lead_id != null ? `lead_id=${convoso.lead_id}` : "");
+  return convoso;
 }
 
 function requireSecret(req, res) {
@@ -87,25 +111,25 @@ app.post("/convoso/call-completed", async (req, res) => {
 
   try {
     // You’ll map these fields from Convoso later. For now we accept flexible keys.
-    const rawPhone = req.body.phone || req.body.phone_number || req.body.caller_id || req.body.lead_phone;
-    const direction = (req.body.direction || req.body.call_type || "Incoming").toLowerCase().includes("out")
+    const convoso = parseConvosoBody(req);
+    const phone = convoso.phone;
+    if (!phone) return res.status(400).json({ ok: false, error: "Missing phone" });
+
+    const direction = (convoso.direction || convoso.call_type || "Incoming").toLowerCase().includes("out")
       ? "Outgoing"
       : "Incoming";
-
-    const phone = normalizePhone(rawPhone);
-    if (!phone) return res.status(400).json({ ok: false, error: "Missing phone" });
 
     const search = await forthSearchContactByPhone(phone);
     const contact = search?.body?.response?.[0];
     if (!contact?.id) return res.status(200).json({ ok: true, skipped: "No matching contact in Forth" });
 
     // Simple heuristic for disposition at call end:
-    const talkSec = Number(req.body.talk_time || req.body.talk_seconds || 0);
+    const talkSec = Number(convoso.talk_time || convoso.talk_seconds || 0);
     const dispId = talkSec > 0 ? DISP.CONNECTED : DISP.NO_ANSWER;
 
-    const createdAt = req.body.created_at || req.body.call_end_time || new Date().toISOString().slice(0, 19).replace("T", " ");
+    const createdAt = convoso.created_at || convoso.call_end_time || new Date().toISOString().slice(0, 19).replace("T", " ");
 
-    const durationSec = Number(req.body.duration || req.body.duration_seconds || 0);
+    const durationSec = Number(convoso.duration || convoso.duration_seconds || 0);
     const hh = String(Math.floor(durationSec / 3600)).padStart(2, "0");
     const mm = String(Math.floor((durationSec % 3600) / 60)).padStart(2, "0");
     const ss = String(durationSec % 60).padStart(2, "0");
@@ -121,8 +145,7 @@ app.post("/convoso/call-completed", async (req, res) => {
       notes,
       duration,
       event_id: 0,
-      ...(req.body.recording_url ? { recording_url: req.body.recording_url } : {})
-      // dialer_id omitted (Convoso not listed)
+      ...(convoso.recording_url ? { recording_url: convoso.recording_url } : {})
     });
 
     return res.status(200).json({ ok: true, forth: create.body });
@@ -138,12 +161,13 @@ app.post("/convoso/disposition", async (req, res) => {
   if (!requireSecret(req, res)) return;
 
   try {
-    const disposition = (req.body.disposition ?? req.body.disposition_name ?? "").toString().trim();
+    const convoso = parseConvosoBody(req);
+    const disposition = (convoso.disposition ?? convoso.disposition_name ?? "").toString().trim();
     if (!disposition) return res.status(200).json({ ok: true, skipped: "Disposition blank" });
 
-    const callId = req.body.call_id != null ? String(req.body.call_id) : null;
-    const leadId = req.body.lead_id != null ? String(req.body.lead_id) : "";
-    const callStartTs = req.body.call_start_time ?? req.body.start_time ?? req.body.created_at ?? "";
+    const callId = convoso.call_id != null ? String(convoso.call_id) : null;
+    const leadId = convoso.lead_id != null ? String(convoso.lead_id) : "";
+    const callStartTs = convoso.call_start_time ?? convoso.start_time ?? convoso.created_at ?? "";
     const timestamp = callStartTs || String(Date.now());
     const dedupeKey = callId ? `disp_first_set:${callId}` : `disp_first_set:${leadId}:${timestamp}`;
 
@@ -155,18 +179,17 @@ app.post("/convoso/disposition", async (req, res) => {
     // Set immediately so second request returns deduped before any Forth lookup
     firstDispositionSeen.set(dedupeKey, {
       ts: Date.now(),
-      disposition_id: req.body.disposition_id ?? req.body.id ?? ""
+      disposition_id: convoso.disposition_id ?? convoso.id ?? ""
     });
 
-    const rawPhone = req.body.phone || req.body.phone_number || req.body.caller_id || req.body.lead_phone;
-    const phone = normalizePhone(rawPhone);
+    const phone = convoso.phone;
     if (!phone) return res.status(400).json({ ok: false, error: "Missing phone" });
 
     const search = await forthSearchContactByPhone(phone);
     const contact = search?.body?.response?.[0];
     if (!contact?.id) return res.status(200).json({ ok: true, skipped: "No matching contact in Forth" });
 
-    const direction = (req.body.direction || req.body.call_type || "Incoming").toLowerCase().includes("out")
+    const direction = (convoso.direction || convoso.call_type || "Incoming").toLowerCase().includes("out")
       ? "Outgoing"
       : "Incoming";
 
@@ -176,7 +199,7 @@ app.post("/convoso/disposition", async (req, res) => {
       /left|vm|voicemail|message/i.test(disposition) ? DISP.LEFT_MESSAGE :
       DISP.CONNECTED;
 
-    const createdAt = req.body.created_at || new Date().toISOString().slice(0, 19).replace("T", " ");
+    const createdAt = convoso.created_at || new Date().toISOString().slice(0, 19).replace("T", " ");
     const notes = `Convoso - Disposition: ${disposition} | phone=${phone}`;
 
     await forthCreateCall({
@@ -187,7 +210,7 @@ app.post("/convoso/disposition", async (req, res) => {
       notes,
       duration: "00:00:00",
       event_id: 0,
-      ...(req.body.recording_url ? { recording_url: req.body.recording_url } : {})
+      ...(convoso.recording_url ? { recording_url: convoso.recording_url } : {})
     });
 
     return res.status(200).json({ ok: true, created: true });
