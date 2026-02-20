@@ -23,6 +23,38 @@ const DISP = {
   BUSY: 6
 };
 
+/**
+ * Map Convoso outcome fields to Forth call_disposition ID and call_result label.
+ * If no outcome fields present, returns { dispId: DISP.CONNECTED, call_result: "Logged", source: "default" }.
+ */
+function mapCallCompletedOutcome(convoso) {
+  const termReason = String(convoso.term_reason ?? convoso.term_reason_id ?? "").trim();
+  const statusName = String(convoso.status_name ?? convoso.status ?? "").trim();
+  const disposition = String(convoso.disposition ?? convoso.disposition_name ?? "").trim();
+  const callResult = String(convoso.call_result ?? "").trim();
+  const talkSec = Number(convoso.talk_time ?? convoso.talk_seconds ?? 0);
+  const combined = [termReason, statusName, disposition, callResult].join(" ").toLowerCase();
+
+  const hasOutcome = talkSec > 0 || termReason || statusName || disposition || callResult;
+  if (!hasOutcome) {
+    return { dispId: DISP.CONNECTED, call_result: "Logged", source: "default" };
+  }
+
+  if (talkSec > 0) {
+    return { dispId: DISP.CONNECTED, call_result: "Connected", source: "convoso" };
+  }
+  if (/no answer|noanswer|na\b/i.test(combined)) {
+    return { dispId: DISP.NO_ANSWER, call_result: "No Answer", source: "convoso" };
+  }
+  if (/busy/i.test(combined)) {
+    return { dispId: DISP.BUSY, call_result: "Busy", source: "convoso" };
+  }
+  if (/left|vm|voicemail|message/i.test(combined)) {
+    return { dispId: DISP.LEFT_MESSAGE, call_result: "Left Message", source: "convoso" };
+  }
+  return { dispId: DISP.CONNECTED, call_result: "Connected", source: "convoso" };
+}
+
 // First-disposition dedupe: key = disp_first_set:${call_id} or disp_first_set:${lead_id}:${ts}. TTL 30 days.
 const firstDispositionSeen = new Map();
 const FIRST_DISPOSITION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -133,9 +165,10 @@ app.post("/convoso/call-completed", async (req, res) => {
     const contact = search?.body?.response?.[0];
     if (!contact?.id) return res.status(200).json({ ok: true, skipped: "No matching contact in Forth" });
 
-    // Simple heuristic for disposition at call end:
-    const talkSec = Number(convoso.talk_time || convoso.talk_seconds || 0);
-    const dispId = talkSec > 0 ? DISP.CONNECTED : DISP.NO_ANSWER;
+    const outcome = mapCallCompletedOutcome(convoso);
+    const dispId = outcome.dispId;
+    const callResult = outcome.call_result;
+    console.log("[call-completed] call_result=" + callResult + " (source=" + outcome.source + ")");
 
     const createdAt = convoso.created_at || convoso.call_end_time || new Date().toISOString().slice(0, 19).replace("T", " ");
 
@@ -158,6 +191,7 @@ app.post("/convoso/call-completed", async (req, res) => {
       created_at: createdAt,
       call_type: direction,
       call_disposition: dispId,
+      call_result: callResult,
       notes,
       duration,
       event_id: 0,
