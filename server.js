@@ -158,23 +158,36 @@ async function fetchConvosoCallLog(phone) {
   const url = `${CONVOSO_API_BASE}/v1/log/retrieve?${params.toString()}`;
   const last10 = phoneDigits.length >= 10 ? phoneDigits.slice(-10) : phoneDigits;
   console.log("[call-completed] enrichment query phone_digits_len=" + phoneDigits.length + " phone_last10=" + last10);
-  const timeoutMs = 8000;
+  const timeoutMs = 15000;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const delays = [0, 3000, 5000];
   try {
-    const r = await fetch(url, { method: "GET", signal: controller.signal });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (attempt > 1) {
+        await new Promise((r) => setTimeout(r, delays[attempt - 1]));
+      }
+      const r = await fetch(url, { method: "GET", signal: controller.signal });
+      const j = await r.json();
+      if (!r.ok) {
+        clearTimeout(timeoutId);
+        console.log("[call-completed] enrichment fetch fail: HTTP " + r.status + " " + (j?.message ?? j?.error ?? ""));
+        return null;
+      }
+      const list = j?.data ?? j?.logs ?? Array.isArray(j) ? j : [];
+      if (Array.isArray(list) && list.length > 0) {
+        clearTimeout(timeoutId);
+        const entry = list[0];
+        entry._attempt = attempt;
+        return entry;
+      }
+      if (attempt < 3) {
+        console.log("[call-completed] enrichment retry " + attempt + "/3: no results");
+      }
+    }
     clearTimeout(timeoutId);
-    const j = await r.json();
-    if (!r.ok) {
-      console.log("[call-completed] enrichment fetch fail: HTTP " + r.status + " " + (j?.message ?? j?.error ?? ""));
-      return null;
-    }
-    const list = j?.data ?? j?.logs ?? Array.isArray(j) ? j : [];
-    if (!Array.isArray(list) || list.length === 0) {
-      console.log("[call-completed] enrichment fetch fail: no results");
-      return null;
-    }
-    return list[0];
+    console.log("[call-completed] enrichment fetch fail: no results");
+    return null;
   } catch (e) {
     clearTimeout(timeoutId);
     const msg = e?.name === "AbortError" ? "timeout (" + timeoutMs + "ms)" : (e?.message ?? String(e));
@@ -244,7 +257,7 @@ app.post("/convoso/call-completed", async (req, res) => {
       const callLength = convosoLog.call_length ?? convosoLog.call_length_seconds ?? "";
       notes = baseNote + " | Direction: " + dirLabel + " | ConvosoLogID:" + logId + " | Status:" + statusName + " | Term:" + termReason + " | Len:" + callLength + "s";
       outcome = mapCallCompletedOutcome({ ...convoso, term_reason: convosoLog.term_reason, status_name: convosoLog.status_name, talk_time: convosoLog.call_length ?? convosoLog.call_length_seconds });
-      console.log("[call-completed] enrichment ok call_type=" + (convosoLog.call_type ?? "") + " convoso_log_id=" + logId);
+      console.log("[call-completed] enrichment ok (attempt " + (convosoLog._attempt || 1) + ") call_type=" + (convosoLog.call_type ?? "") + " convoso_log_id=" + logId);
     } else {
       direction = (convoso.direction || convoso.call_type || "Incoming").toLowerCase().includes("out") ? "Outgoing" : "Incoming";
       const rawNote = (convoso.notes ?? convoso.params?.notes ?? convoso.note ?? convoso.comments ?? convoso.call_notes ?? "").toString().trim();
