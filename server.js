@@ -141,7 +141,13 @@ app.post("/convoso/call-completed", async (req, res) => {
     const ss = String(durationSec % 60).padStart(2, "0");
     const duration = `${hh}:${mm}:${ss}`;
 
-    const notes = `Convoso - Call Completed | phone=${phone}`;
+    const rawNote = (convoso.notes ?? convoso.params?.notes ?? convoso.note ?? convoso.comments ?? convoso.call_notes ?? "").toString().trim();
+    const notes = rawNote || "No Agent Note - Convoso call logged automatically (Call Completed).";
+    if (rawNote) {
+      console.log("[call-completed] Using agent note (len=" + rawNote.length + ")");
+    } else {
+      console.log("[call-completed] No agent note found; using fallback");
+    }
 
     const create = await forthCreateCall({
       contactID: Number(contact.id),
