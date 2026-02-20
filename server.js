@@ -136,31 +136,24 @@ function formatConvosoTime(date) {
 }
 
 /**
- * Fetch Convoso Call Log for phone; returns best matching log entry or null on failure/no data.
+ * Fetch Convoso Call Log for phone; returns newest log entry or null on failure/no data.
+ * No start_time/end_time; order=desc so results[0] is newest.
  * Uses process.env.CONVOSO_AUTH_TOKEN at request time.
  */
-async function fetchConvosoCallLog(phone, listId) {
+async function fetchConvosoCallLog(phone) {
   const authToken = process.env.CONVOSO_AUTH_TOKEN;
   if (!authToken || !authToken.trim()) {
     console.log("[call-completed] enrichment skipped: missing CONVOSO_AUTH_TOKEN");
     return null;
   }
   if (!phone) return null;
-  const now = new Date();
-  const start = new Date(now.getTime() - 60 * 60 * 1000);
-  const end = new Date(now.getTime() + 10 * 60 * 1000);
   const params = new URLSearchParams({
     auth_token: authToken,
     phone_number: String(phone),
-    start_time: formatConvosoTime(start),
-    end_time: formatConvosoTime(end),
     order: "desc",
-    limit: "3",
+    limit: "5",
     include_recordings: "0"
   });
-  if (listId != null && String(listId).trim() !== "") {
-    params.set("list_id", String(listId).trim());
-  }
   const url = `${CONVOSO_API_BASE}/v1/log/retrieve?${params.toString()}`;
   const timeoutMs = 8000;
   const controller = new AbortController();
@@ -178,14 +171,7 @@ async function fetchConvosoCallLog(phone, listId) {
       console.log("[call-completed] enrichment fetch fail: no results");
       return null;
     }
-    const nowTs = now.getTime();
-    const withDiff = list.map((entry) => {
-      const dateStr = entry.call_date ?? entry.call_date_time ?? entry.date ?? "";
-      const entryTs = dateStr ? new Date(dateStr).getTime() : 0;
-      return { entry, diff: Math.abs(nowTs - entryTs) };
-    });
-    withDiff.sort((a, b) => a.diff - b.diff);
-    return withDiff[0].entry;
+    return list[0];
   } catch (e) {
     clearTimeout(timeoutId);
     const msg = e?.name === "AbortError" ? "timeout (" + timeoutMs + "ms)" : (e?.message ?? String(e));
@@ -240,7 +226,7 @@ app.post("/convoso/call-completed", async (req, res) => {
       const last4 = phone.length >= 4 ? phone.slice(-4) : "????";
       console.log("[call-completed] enrichment fetching convoso for phone_last4=" + last4);
     }
-    const convosoLog = await fetchConvosoCallLog(phone, convoso.list_id);
+    const convosoLog = await fetchConvosoCallLog(phone);
     let direction;
     let notes;
     let outcome;
