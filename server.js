@@ -10,10 +10,13 @@ app.use(express.urlencoded({ extended: true, limit: "1mb" }));
  * FORTH_API_KEY = the api_key you obtained from /v1/auth/token
  * FORTH_BASE_URL = https://api.forthcrm.com
  * SHARED_SECRET = a random string you will also put in Convoso (as a header value)
+ * CONVOSO_AUTH_TOKEN = Convoso API auth token for Call Log Retrieve
  */
 const FORTH_API_KEY = process.env.FORTH_API_KEY;
 const FORTH_BASE_URL = process.env.FORTH_BASE_URL || "https://api.forthcrm.com";
 const SHARED_SECRET = process.env.SHARED_SECRET;
+const CONVOSO_AUTH_TOKEN = process.env.CONVOSO_AUTH_TOKEN;
+const CONVOSO_API_BASE = "https://api.convoso.com";
 
 // Minimal disposition mapping (you can expand later)
 const DISP = {
@@ -122,6 +125,60 @@ async function forthSearchContactByPhone(phone) {
   return { status: r.status, body: j };
 }
 
+function formatConvosoTime(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  const h = String(date.getHours()).padStart(2, "0");
+  const min = String(date.getMinutes()).padStart(2, "0");
+  const s = String(date.getSeconds()).padStart(2, "0");
+  return `${y}-${m}-${d} ${h}:${min}:${s}`;
+}
+
+/**
+ * Fetch Convoso Call Log for phone; returns best matching log entry or null on failure/no data.
+ */
+async function fetchConvosoCallLog(phone) {
+  if (!CONVOSO_AUTH_TOKEN || !phone) return null;
+  const now = new Date();
+  const start = new Date(now.getTime() - 10 * 60 * 1000);
+  const end = new Date(now.getTime() + 2 * 60 * 1000);
+  const params = new URLSearchParams({
+    auth_token: CONVOSO_AUTH_TOKEN,
+    phone_number: phone,
+    start_time: formatConvosoTime(start),
+    end_time: formatConvosoTime(end),
+    order: "desc",
+    limit: "3",
+    include_recordings: "0"
+  });
+  const url = `${CONVOSO_API_BASE}/v1/log/retrieve?${params.toString()}`;
+  try {
+    const r = await fetch(url, { method: "GET" });
+    const j = await r.json();
+    const list = j?.data ?? j?.logs ?? Array.isArray(j) ? j : [];
+    if (!Array.isArray(list) || list.length === 0) return null;
+    const nowTs = now.getTime();
+    const withDiff = list.map((entry) => {
+      const dateStr = entry.call_date ?? entry.call_date_time ?? entry.date ?? "";
+      const entryTs = dateStr ? new Date(dateStr).getTime() : 0;
+      return { entry, diff: Math.abs(nowTs - entryTs) };
+    });
+    withDiff.sort((a, b) => a.diff - b.diff);
+    return withDiff[0].entry;
+  } catch (e) {
+    console.log("[call-completed] Convoso Call Log fetch failed: " + (e?.message ?? String(e)));
+    return null;
+  }
+}
+
+function directionFromConvosoCallType(callType) {
+  const t = String(callType ?? "").toUpperCase();
+  if (t === "INBOUND") return "INBOUND";
+  if (t === "OUTBOUND" || t === "MANUAL") return "OUTBOUND";
+  return t || "UNKNOWN";
+}
+
 async function forthCreateCall(payload) {
   const url = `${FORTH_BASE_URL}/v1/calls`;
   const r = await fetch(url, {
@@ -157,34 +214,49 @@ app.post("/convoso/call-completed", async (req, res) => {
     const phone = convoso.phone;
     if (!phone) return res.status(400).json({ ok: false, error: "Missing phone" });
 
-    const direction = (convoso.direction || convoso.call_type || "Incoming").toLowerCase().includes("out")
-      ? "Outgoing"
-      : "Incoming";
+    const convosoLog = await fetchConvosoCallLog(phone);
+    let direction;
+    let notes;
+    let outcome;
+    if (convosoLog) {
+      const dirLabel = directionFromConvosoCallType(convosoLog.call_type);
+      direction = dirLabel === "INBOUND" ? "Incoming" : dirLabel === "OUTBOUND" ? "Outgoing" : (convoso.direction || convoso.call_type || "Incoming").toLowerCase().includes("out") ? "Outgoing" : "Incoming";
+      const agentComment = String(convosoLog.agent_comment ?? "").trim();
+      const baseNote = agentComment || "No Agent Note - Convoso call logged automatically (Call Completed).";
+      const logId = convosoLog.id ?? "";
+      const statusName = String(convosoLog.status_name ?? "").trim();
+      const termReason = String(convosoLog.term_reason ?? "").trim();
+      const callLength = convosoLog.call_length ?? convosoLog.call_length_seconds ?? "";
+      notes = baseNote + " | Direction: " + dirLabel + " | ConvosoLogID:" + logId + " | Status:" + statusName + " | Term:" + termReason + " | Len:" + callLength + "s";
+      outcome = mapCallCompletedOutcome({ ...convoso, term_reason: convosoLog.term_reason, status_name: convosoLog.status_name, talk_time: convosoLog.call_length ?? convosoLog.call_length_seconds });
+      console.log("[call-completed] enrichment ok call_type=" + (convosoLog.call_type ?? "") + " convoso_log_id=" + logId);
+    } else {
+      direction = (convoso.direction || convoso.call_type || "Incoming").toLowerCase().includes("out") ? "Outgoing" : "Incoming";
+      const rawNote = (convoso.notes ?? convoso.params?.notes ?? convoso.note ?? convoso.comments ?? convoso.call_notes ?? "").toString().trim();
+      notes = rawNote || "No Agent Note - Convoso call logged automatically (Call Completed).";
+      outcome = mapCallCompletedOutcome(convoso);
+      if (rawNote) {
+        console.log("[call-completed] Using agent note (len=" + rawNote.length + ")");
+      } else {
+        console.log("[call-completed] No agent note found; using fallback");
+      }
+    }
+
+    const dispId = outcome.dispId;
+    const callResult = outcome.call_result;
+    console.log("[call-completed] call_result=" + callResult + " (source=" + outcome.source + ")");
 
     const search = await forthSearchContactByPhone(phone);
     const contact = search?.body?.response?.[0];
     if (!contact?.id) return res.status(200).json({ ok: true, skipped: "No matching contact in Forth" });
 
-    const outcome = mapCallCompletedOutcome(convoso);
-    const dispId = outcome.dispId;
-    const callResult = outcome.call_result;
-    console.log("[call-completed] call_result=" + callResult + " (source=" + outcome.source + ")");
+    const createdAt = convoso.created_at || convoso.call_end_time || (convosoLog?.call_date ?? convosoLog?.call_date_time) || new Date().toISOString().slice(0, 19).replace("T", " ");
 
-    const createdAt = convoso.created_at || convoso.call_end_time || new Date().toISOString().slice(0, 19).replace("T", " ");
-
-    const durationSec = Number(convoso.duration || convoso.duration_seconds || 0);
+    const durationSec = Number(convosoLog?.call_length ?? convosoLog?.call_length_seconds ?? convoso.duration ?? convoso.duration_seconds ?? 0);
     const hh = String(Math.floor(durationSec / 3600)).padStart(2, "0");
     const mm = String(Math.floor((durationSec % 3600) / 60)).padStart(2, "0");
     const ss = String(durationSec % 60).padStart(2, "0");
     const duration = `${hh}:${mm}:${ss}`;
-
-    const rawNote = (convoso.notes ?? convoso.params?.notes ?? convoso.note ?? convoso.comments ?? convoso.call_notes ?? "").toString().trim();
-    const notes = rawNote || "No Agent Note - Convoso call logged automatically (Call Completed).";
-    if (rawNote) {
-      console.log("[call-completed] Using agent note (len=" + rawNote.length + ")");
-    } else {
-      console.log("[call-completed] No agent note found; using fallback");
-    }
 
     const create = await forthCreateCall({
       contactID: Number(contact.id),
@@ -195,7 +267,7 @@ app.post("/convoso/call-completed", async (req, res) => {
       notes,
       duration,
       event_id: 0,
-      ...(convoso.recording_url ? { recording_url: convoso.recording_url } : {})
+      ...(convoso.recording_url ?? convosoLog?.recording_url ? { recording_url: convoso.recording_url || convosoLog?.recording_url } : {})
     });
 
     return res.status(200).json({ ok: true, forth: create.body });
