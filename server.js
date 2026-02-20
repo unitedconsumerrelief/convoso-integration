@@ -3,6 +3,7 @@ const querystring = require("querystring");
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 /**
  * ENV VARS you will set in Render:
@@ -44,25 +45,29 @@ function normalizePhone(raw) {
 
 /**
  * Parse Convoso body: support direct JSON or req.body.params (x-www-form-urlencoded string).
- * Returns { ...parsedFields, phone } where phone is normalized for lookup (digits).
+ * Returns { ...parsedFields, phone, _inputType } where phone is normalized for lookup (digits).
  */
 function parseConvosoBody(req) {
   const body = req.body || {};
   if (typeof body.params === "string") {
     const parsed = querystring.parse(body.params);
-    const phoneNumber = parsed.phone_number ?? parsed.phone ?? "";
+    const phoneNumber = String(parsed.phone_number ?? parsed.phone ?? "").trim();
     const phoneCode = String(parsed.phone_code ?? "").trim();
     const digits = normalizePhone(phoneNumber);
-    const normalizedPhone = digits;
+    const phone = digits;
     const phoneE164 = phoneCode && digits ? `+${phoneCode}${digits}` : null;
-    const convoso = { ...parsed, phone: normalizedPhone, phone_number: phoneNumber, phone_code: phoneCode, phoneE164 };
-    console.log("[convoso] input=params", convoso.call_id != null ? `call_id=${convoso.call_id}` : "", convoso.lead_id != null ? `lead_id=${convoso.lead_id}` : "");
+    const convoso = { ...parsed, phone, phone_number: phoneNumber, phone_code: phoneCode, phoneE164, _inputType: "params" };
     return convoso;
   }
   const rawPhone = body.phone || body.phone_number || body.caller_id || body.lead_phone;
-  const convoso = { ...body, phone: normalizePhone(rawPhone) };
-  console.log("[convoso] input=json", convoso.call_id != null ? `call_id=${convoso.call_id}` : "", convoso.lead_id != null ? `lead_id=${convoso.lead_id}` : "");
+  const convoso = { ...body, phone: normalizePhone(rawPhone), _inputType: "json" };
   return convoso;
+}
+
+function logConvosoRequest(routeName, convoso) {
+  const inputType = convoso._inputType || "json";
+  const last4 = convoso.phone && convoso.phone.length >= 4 ? convoso.phone.slice(-4) : "none";
+  console.log(`[${routeName}] parsed=${inputType} phone_last4=${last4}`);
 }
 
 function requireSecret(req, res) {
@@ -112,6 +117,7 @@ app.post("/convoso/call-completed", async (req, res) => {
   try {
     // You’ll map these fields from Convoso later. For now we accept flexible keys.
     const convoso = parseConvosoBody(req);
+    logConvosoRequest("call-completed", convoso);
     const phone = convoso.phone;
     if (!phone) return res.status(400).json({ ok: false, error: "Missing phone" });
 
