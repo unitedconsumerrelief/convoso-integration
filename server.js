@@ -21,7 +21,7 @@ const DISP = {
   BUSY: 6
 };
 
-// First-disposition dedupe: key = call_id or "lead_id|call_start_ts", value = { ts, disposition_id }. TTL 30 days.
+// First-disposition dedupe: key = disp_first_set:${call_id} or disp_first_set:${lead_id}:${ts}. TTL 30 days.
 const firstDispositionSeen = new Map();
 const FIRST_DISPOSITION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -132,7 +132,7 @@ app.post("/convoso/call-completed", async (req, res) => {
 });
 
 /**
- * POST /convoso/disposition — first disposition only; deduped by call_id or lead_id + call start ts.
+ * POST /convoso/disposition — first disposition only; dedupe gate BEFORE any Forth lookup.
  */
 app.post("/convoso/disposition", async (req, res) => {
   if (!requireSecret(req, res)) return;
@@ -144,12 +144,19 @@ app.post("/convoso/disposition", async (req, res) => {
     const callId = req.body.call_id != null ? String(req.body.call_id) : null;
     const leadId = req.body.lead_id != null ? String(req.body.lead_id) : "";
     const callStartTs = req.body.call_start_time ?? req.body.start_time ?? req.body.created_at ?? "";
-    const dedupeKey = callId || `${leadId}|${callStartTs}`;
+    const timestamp = callStartTs || String(Date.now());
+    const dedupeKey = callId ? `disp_first_set:${callId}` : `disp_first_set:${leadId}:${timestamp}`;
 
     pruneFirstDispositionSeen();
     if (firstDispositionSeen.has(dedupeKey)) {
       return res.status(200).json({ ok: true, skipped: "Disposition already processed", deduped: true });
     }
+
+    // Set immediately so second request returns deduped before any Forth lookup
+    firstDispositionSeen.set(dedupeKey, {
+      ts: Date.now(),
+      disposition_id: req.body.disposition_id ?? req.body.id ?? ""
+    });
 
     const rawPhone = req.body.phone || req.body.phone_number || req.body.caller_id || req.body.lead_phone;
     const phone = normalizePhone(rawPhone);
@@ -181,11 +188,6 @@ app.post("/convoso/disposition", async (req, res) => {
       duration: "00:00:00",
       event_id: 0,
       ...(req.body.recording_url ? { recording_url: req.body.recording_url } : {})
-    });
-
-    firstDispositionSeen.set(dedupeKey, {
-      ts: Date.now(),
-      disposition_id: req.body.disposition_id ?? req.body.id ?? ""
     });
 
     return res.status(200).json({ ok: true, created: true });
