@@ -247,6 +247,20 @@ function convosoCallTypeToForth(callType) {
   return null;
 }
 
+/**
+ * Direction prefix for notes: Incoming, Outgoing, or MISSING when call_type not sent.
+ * Strip any existing "Direction: ... | " from notesBody to avoid stacking.
+ */
+function applyDirectionPrefix(notesBody, direction) {
+  const stripped = String(notesBody ?? "").replace(/^Direction:\s*[^|]*\s*\|\s*/i, "").trim();
+  const prefix = direction === "Incoming"
+    ? "Direction: Incoming | "
+    : direction === "Outgoing"
+      ? "Direction: Outgoing | "
+      : "Direction: MISSING (Convoso did not send call_type) | ";
+  return prefix + (stripped || "");
+}
+
 async function forthCreateCall(payload) {
   const url = `${FORTH_BASE_URL}/v1/calls`;
   const r = await fetch(url, {
@@ -296,14 +310,14 @@ app.post("/convoso/call-completed", async (req, res) => {
       const termReason = String(convosoLog.term_reason ?? "").trim();
       const callLength = convosoLog.call_length ?? convosoLog.call_length_seconds ?? "";
       const notesBody = baseNote + " | ConvosoLogID:" + logId + " | Status:" + statusName + " | Term:" + termReason + " | Len:" + callLength + "s";
-      notes = (direction ? "Direction: " + direction + " | " : "") + notesBody;
+      notes = applyDirectionPrefix(notesBody, direction);
       outcome = mapCallCompletedOutcome({ ...convoso, term_reason: convosoLog.term_reason, status_name: convosoLog.status_name, talk_time: convosoLog.call_length ?? convosoLog.call_length_seconds });
       console.log("[call-completed] enrichment ok (attempt " + (convosoLog._attempt || 1) + ") call_type=" + (convosoLog.call_type ?? "") + " convoso_log_id=" + logId);
     } else {
       direction = convosoCallTypeToForth(convoso.call_type);
       const rawNote = (convoso.notes ?? convoso.params?.notes ?? convoso.note ?? convoso.comments ?? convoso.call_notes ?? "").toString().trim();
       const notesBody = rawNote || "No Agent Note - Convoso call logged automatically (Call Completed).";
-      notes = (direction ? "Direction: " + direction + " | " : "") + notesBody;
+      notes = applyDirectionPrefix(notesBody, direction);
       outcome = mapCallCompletedOutcome(convoso);
       if (rawNote) {
         console.log("[call-completed] Using agent note (len=" + rawNote.length + ")");
