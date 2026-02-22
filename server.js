@@ -99,6 +99,47 @@ function parseConvosoBody(req) {
   return convoso;
 }
 
+/**
+ * Normalize a plain object (from JSON array element or JSON object) for call-completed: phone, call_type, call_log_id.
+ */
+function normalizePayloadObject(raw, _inputType) {
+  const phoneNumber = String(raw.phone_number ?? raw.phone ?? raw.primary_phone ?? raw.PhoneNumber ?? "").trim();
+  const phone = normalizePhone(phoneNumber);
+  const call_type = raw.call_type ?? raw.callType ?? raw.CallType ?? "";
+  const call_log_id = raw.call_log_id ?? raw.callLogId ?? "";
+  return { ...raw, phone_number: phoneNumber, phone, call_type, call_log_id, _inputType };
+}
+
+/**
+ * Normalize incoming request body for POST /convoso/call-completed.
+ * Accepts: params string (querystring), JSON array, JSON object, or params as array/object.
+ * Returns single payload object with phone, phone_number, call_type, call_log_id, _inputType.
+ */
+function normalizeIncomingPayload(req) {
+  const body = req.body || {};
+  if (typeof body.params === "string") {
+    const parsed = querystring.parse(body.params);
+    const phoneNumber = String(parsed.phone_number ?? parsed.phone ?? "").trim();
+    const phoneCode = String(parsed.phone_code ?? "").trim();
+    const digits = normalizePhone(phoneNumber);
+    const phoneE164 = phoneCode && digits ? `+${phoneCode}${digits}` : null;
+    const convoso = { ...parsed, phone: digits, phone_number: phoneNumber, phone_code: phoneCode, phoneE164, _inputType: "params" };
+    return convoso;
+  }
+  if (Array.isArray(body)) {
+    const raw = body[0] || {};
+    return normalizePayloadObject(raw, "json_array");
+  }
+  if (Array.isArray(body.params)) {
+    const raw = body.params[0] || {};
+    return normalizePayloadObject(raw, "json_params_array");
+  }
+  if (body.params && typeof body.params === "object" && !Array.isArray(body.params)) {
+    return normalizePayloadObject(body.params, "json_params_object");
+  }
+  return normalizePayloadObject(body, "json_object");
+}
+
 function logConvosoRequest(routeName, convoso) {
   const inputType = convoso._inputType || "json";
   const last4 = convoso.phone && convoso.phone.length >= 4 ? convoso.phone.slice(-4) : "none";
@@ -232,12 +273,9 @@ app.post("/convoso/call-completed", async (req, res) => {
 
   try {
     // You’ll map these fields from Convoso later. For now we accept flexible keys.
-    const convoso = parseConvosoBody(req);
+    const convoso = normalizeIncomingPayload(req);
     logConvosoRequest("call-completed", convoso);
-    console.log("[call-completed] payload_keys=" + JSON.stringify(Object.keys(convoso).sort()));
-    if (typeof convoso.params === "object" && convoso.params !== null) {
-      console.log("[call-completed] params_keys=" + JSON.stringify(Object.keys(convoso.params).sort()));
-    }
+    console.log("[call-completed] input=" + (convoso._inputType || "unknown") + " payload_keys=" + JSON.stringify(Object.keys(convoso).sort()));
     const phone = convoso.phone;
     if (!phone) return res.status(400).json({ ok: false, error: "Missing phone" });
 
