@@ -179,6 +179,10 @@ async function refreshForthAccessToken() {
         body: JSON.stringify({ client_id: clientId, client_secret: clientSecret })
       });
       const j = await r.json();
+      console.log("[forth-auth] token refresh response status=" + r.status + " keys=" + JSON.stringify(Object.keys(j).sort()));
+      if (j && typeof j.data === "object" && j.data !== null) {
+        console.log("[forth-auth] token refresh response data_keys=" + JSON.stringify(Object.keys(j.data).sort()));
+      }
       if (!r.ok) throw new Error(j?.message ?? j?.error ?? "HTTP " + r.status);
       const token = j?.response?.access_token ?? j?.response?.token ?? j?.access_token ?? j?.token ?? null;
       if (!token) throw new Error("No access_token in response");
