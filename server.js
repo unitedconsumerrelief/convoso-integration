@@ -184,8 +184,13 @@ async function refreshForthAccessToken() {
         console.log("[forth-auth] token refresh response data_keys=" + JSON.stringify(Object.keys(j.data).sort()));
       }
       if (!r.ok) throw new Error(j?.message ?? j?.error ?? "HTTP " + r.status);
-      const token = j?.response?.access_token ?? j?.response?.token ?? j?.access_token ?? j?.token ?? null;
-      if (!token) throw new Error("No access_token in response");
+      const token =
+        j?.access_token ||
+        j?.response?.access_token ||
+        j?.response?.api_key ||
+        j?.response?.token ||
+        j?.response?.ApiKey;
+      if (!token) throw new Error("No access_token in response (keys=" + JSON.stringify(Object.keys(j || {})) + ", response_keys=" + JSON.stringify(Object.keys(j?.response || {})) + ")");
       forthAccessToken = token;
       const expiresIn = j?.response?.expires_in ?? j?.expires_in;
       forthTokenExpiresAt = expiresIn
