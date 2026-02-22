@@ -7,16 +7,25 @@ app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 /**
  * ENV VARS you will set in Render:
- * FORTH_API_KEY = the api_key you obtained from /v1/auth/token
+ * FORTH_API_KEY = current access token (expires; used as fallback if refresh creds missing)
  * FORTH_BASE_URL = https://api.forthcrm.com
+ * FORTH_KEY_ID = permanent key id for token refresh
+ * FORTH_API_SECRET = permanent secret for token refresh
  * SHARED_SECRET = a random string you will also put in Convoso (as a header value)
  * CONVOSO_AUTH_TOKEN = Convoso API auth token for Call Log Retrieve
  */
-const FORTH_API_KEY = process.env.FORTH_API_KEY;
 const FORTH_BASE_URL = process.env.FORTH_BASE_URL || "https://api.forthcrm.com";
 const SHARED_SECRET = process.env.SHARED_SECRET;
 const CONVOSO_AUTH_TOKEN = process.env.CONVOSO_AUTH_TOKEN;
 const CONVOSO_API_BASE = "https://api.convoso.com";
+
+// Forth access token refresh (token expires every 10 days)
+let forthAccessToken = process.env.FORTH_API_KEY || null;
+let forthTokenExpiresAt = 0;
+let forthRefreshPromise = null;
+let forthMissingCredsLogged = false;
+const FORTH_TOKEN_BUFFER_MS = 6 * 60 * 60 * 1000;
+const FORTH_TOKEN_DEFAULT_TTL_MS = 9 * 24 * 60 * 60 * 1000;
 
 // Minimal disposition mapping (you can expand later)
 const DISP = {
@@ -156,12 +165,74 @@ function requireSecret(req, res) {
   return true;
 }
 
+async function refreshForthAccessToken() {
+  if (forthRefreshPromise) return forthRefreshPromise;
+  forthRefreshPromise = (async () => {
+    try {
+      const clientId = process.env.FORTH_KEY_ID;
+      const clientSecret = process.env.FORTH_API_SECRET;
+      if (!clientId || !clientSecret) throw new Error("FORTH_KEY_ID or FORTH_API_SECRET missing");
+      const url = `${FORTH_BASE_URL}/v1/auth/token`;
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_id: clientId, client_secret: clientSecret })
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.message ?? j?.error ?? "HTTP " + r.status);
+      const token = j?.response?.access_token ?? j?.response?.token ?? j?.access_token ?? j?.token ?? null;
+      if (!token) throw new Error("No access_token in response");
+      forthAccessToken = token;
+      const expiresIn = j?.response?.expires_in ?? j?.expires_in;
+      forthTokenExpiresAt = expiresIn
+        ? Date.now() + Math.min(Number(expiresIn) * 1000, FORTH_TOKEN_DEFAULT_TTL_MS)
+        : Date.now() + FORTH_TOKEN_DEFAULT_TTL_MS;
+      console.log("[forth-auth] refreshed token, expiresAt=" + new Date(forthTokenExpiresAt).toISOString());
+      return forthAccessToken;
+    } finally {
+      forthRefreshPromise = null;
+    }
+  })();
+  try {
+    return await forthRefreshPromise;
+  } catch (e) {
+    console.log("[forth-auth] refresh failed: " + (e?.message ?? String(e)));
+    throw e;
+  }
+}
+
+async function getForthApiKey() {
+  const keyId = process.env.FORTH_KEY_ID;
+  const secret = process.env.FORTH_API_SECRET;
+  if (!keyId || !secret) {
+    if (!forthMissingCredsLogged) {
+      forthMissingCredsLogged = true;
+      console.log("[forth-auth] missing creds; using FORTH_API_KEY only");
+    }
+    return process.env.FORTH_API_KEY || "";
+  }
+  if (forthAccessToken && Date.now() < forthTokenExpiresAt - FORTH_TOKEN_BUFFER_MS) return forthAccessToken;
+  return refreshForthAccessToken();
+}
+
+async function forthFetch(url, options) {
+  const apiKey = await getForthApiKey();
+  const headers = { ...options?.headers, "Api-Key": apiKey };
+  let r = await fetch(url, { ...options, headers });
+  if (r.status === 401 || r.status === 403) {
+    console.log("[forth-auth] token rejected (401/403), refreshing and retrying once");
+    forthAccessToken = null;
+    forthTokenExpiresAt = 0;
+    const newKey = await refreshForthAccessToken();
+    const retryHeaders = { ...options?.headers, "Api-Key": newKey };
+    r = await fetch(url, { ...options, headers: retryHeaders });
+  }
+  return r;
+}
+
 async function forthSearchContactByPhone(phone) {
   const url = `${FORTH_BASE_URL}/v1/contacts/search_by_phone/${encodeURIComponent(phone)}`;
-  const r = await fetch(url, {
-    method: "GET",
-    headers: { "Api-Key": FORTH_API_KEY }
-  });
+  const r = await forthFetch(url, { method: "GET" });
   const j = await r.json();
   return { status: r.status, body: j };
 }
@@ -263,12 +334,9 @@ function applyDirectionPrefix(notesBody, direction) {
 
 async function forthCreateCall(payload) {
   const url = `${FORTH_BASE_URL}/v1/calls`;
-  const r = await fetch(url, {
+  const r = await forthFetch(url, {
     method: "POST",
-    headers: {
-      "Api-Key": FORTH_API_KEY,
-      "Content-Type": "application/json"
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
   const j = await r.json();
@@ -277,12 +345,9 @@ async function forthCreateCall(payload) {
 
 async function forthCreateContactNote(contactId, content) {
   const url = `${FORTH_BASE_URL}/v1/contacts/${encodeURIComponent(contactId)}/notes`;
-  const r = await fetch(url, {
+  const r = await forthFetch(url, {
     method: "POST",
-    headers: {
-      "Api-Key": FORTH_API_KEY,
-      "Content-Type": "application/json"
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content: String(content), note_type: 1, public: true })
   });
   const j = await r.json();
@@ -514,4 +579,10 @@ app.post("/convoso/disposition-set", async (req, res) => {
 });
 
 const port = process.env.PORT || 3000;
+if (process.env.FORTH_KEY_ID && process.env.FORTH_API_SECRET) {
+  refreshForthAccessToken().catch((e) => console.log("[forth-auth] startup refresh failed: " + (e?.message ?? String(e))));
+  setInterval(() => {
+    refreshForthAccessToken().catch((e) => console.log("[forth-auth] scheduled refresh failed: " + (e?.message ?? String(e))));
+  }, 9 * 24 * 60 * 60 * 1000);
+}
 app.listen(port, () => console.log(`Listening on ${port}`));
