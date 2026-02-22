@@ -196,11 +196,14 @@ async function fetchConvosoCallLog(phone) {
   }
 }
 
-function directionFromConvosoCallType(callType) {
-  const t = String(callType ?? "").toUpperCase();
-  if (t === "INBOUND") return "INBOUND";
-  if (t === "OUTBOUND" || t === "MANUAL") return "OUTBOUND";
-  return t || "UNKNOWN";
+/**
+ * Map Convoso call_type to Forth call_type. Returns "Incoming" | "Outgoing" | null (omit from payload if null).
+ */
+function convosoCallTypeToForth(callType) {
+  const t = String(callType ?? "").toUpperCase().trim();
+  if (t === "INBOUND") return "Incoming";
+  if (t === "OUTBOUND" || t === "MANUAL") return "Outgoing";
+  return null;
 }
 
 async function forthCreateCall(payload) {
@@ -247,21 +250,22 @@ app.post("/convoso/call-completed", async (req, res) => {
     let notes;
     let outcome;
     if (convosoLog) {
-      const dirLabel = directionFromConvosoCallType(convosoLog.call_type);
-      direction = dirLabel === "INBOUND" ? "Incoming" : dirLabel === "OUTBOUND" ? "Outgoing" : (convoso.direction || convoso.call_type || "Incoming").toLowerCase().includes("out") ? "Outgoing" : "Incoming";
+      direction = convosoCallTypeToForth(convosoLog.call_type);
       const agentComment = String(convosoLog.agent_comment ?? "").trim();
       const baseNote = agentComment || "No Agent Note - Convoso call logged automatically (Call Completed).";
       const logId = convosoLog.id ?? "";
       const statusName = String(convosoLog.status_name ?? "").trim();
       const termReason = String(convosoLog.term_reason ?? "").trim();
       const callLength = convosoLog.call_length ?? convosoLog.call_length_seconds ?? "";
-      notes = baseNote + " | Direction: " + dirLabel + " | ConvosoLogID:" + logId + " | Status:" + statusName + " | Term:" + termReason + " | Len:" + callLength + "s";
+      const notesBody = baseNote + " | ConvosoLogID:" + logId + " | Status:" + statusName + " | Term:" + termReason + " | Len:" + callLength + "s";
+      notes = (direction ? "Direction: " + direction + " | " : "") + notesBody;
       outcome = mapCallCompletedOutcome({ ...convoso, term_reason: convosoLog.term_reason, status_name: convosoLog.status_name, talk_time: convosoLog.call_length ?? convosoLog.call_length_seconds });
       console.log("[call-completed] enrichment ok (attempt " + (convosoLog._attempt || 1) + ") call_type=" + (convosoLog.call_type ?? "") + " convoso_log_id=" + logId);
     } else {
-      direction = (convoso.direction || convoso.call_type || "Incoming").toLowerCase().includes("out") ? "Outgoing" : "Incoming";
+      direction = convosoCallTypeToForth(convoso.call_type);
       const rawNote = (convoso.notes ?? convoso.params?.notes ?? convoso.note ?? convoso.comments ?? convoso.call_notes ?? "").toString().trim();
-      notes = rawNote || "No Agent Note - Convoso call logged automatically (Call Completed).";
+      const notesBody = rawNote || "No Agent Note - Convoso call logged automatically (Call Completed).";
+      notes = (direction ? "Direction: " + direction + " | " : "") + notesBody;
       outcome = mapCallCompletedOutcome(convoso);
       if (rawNote) {
         console.log("[call-completed] Using agent note (len=" + rawNote.length + ")");
@@ -289,7 +293,7 @@ app.post("/convoso/call-completed", async (req, res) => {
     const create = await forthCreateCall({
       contactID: Number(contact.id),
       created_at: createdAt,
-      call_type: direction,
+      ...(direction ? { call_type: direction } : {}),
       call_disposition: dispId,
       call_result: callResult,
       notes,
