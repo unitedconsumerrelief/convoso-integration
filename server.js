@@ -275,6 +275,20 @@ async function forthCreateCall(payload) {
   return { status: r.status, body: j };
 }
 
+async function forthCreateContactNote(contactId, content) {
+  const url = `${FORTH_BASE_URL}/v1/contacts/${encodeURIComponent(contactId)}/notes`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Api-Key": FORTH_API_KEY,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ content: String(content), note_type: 1, public: true })
+  });
+  const j = await r.json();
+  return { status: r.status, body: j };
+}
+
 // Health check
 app.get("/health", (req, res) => res.json({ ok: true }));
 
@@ -334,6 +348,30 @@ app.post("/convoso/call-completed", async (req, res) => {
     const contact = search?.body?.response?.[0];
     if (!contact?.id) return res.status(200).json({ ok: true, skipped: "No matching contact in Forth" });
 
+    const directionMissing = direction != null ? false : true;
+
+    if (directionMissing) {
+      const callLogId = convoso.call_log_id ?? convosoLog?.id ?? "";
+      const callDate = convoso.created_at ?? convoso.call_end_time ?? convosoLog?.call_date ?? convosoLog?.call_date_time ?? "";
+      const durationSec = Number(convosoLog?.call_length ?? convosoLog?.call_length_seconds ?? convoso.duration ?? convoso.duration_seconds ?? 0);
+      const rawNote = (convoso.notes ?? convoso.params?.notes ?? convoso.note ?? convoso.comments ?? convoso.call_notes ?? convosoLog?.agent_comment ?? "").toString().trim();
+      const agentNote = rawNote || "No Agent Note - Convoso call logged automatically (Call Completed).";
+      const parts = [
+        "⚠️ Direction MISSING (Convoso did not send call_type). Call was NOT logged as a Call in Forth because call_type is required.",
+        callLogId ? "call_log_id:" + callLogId : "",
+        callDate ? "call_date:" + callDate : "",
+        durationSec ? "duration:" + durationSec + "s" : "",
+        phone ? "phone_number:" + phone : ""
+      ].filter(Boolean);
+      const noteContent = parts.join(" | ") + " | " + agentNote;
+      console.log("[call-completed] direction missing, creating Forth contact note instead of call");
+      const create = await forthCreateContactNote(contact.id, noteContent);
+      return res.status(200).json({
+        ok: true,
+        forth: { status: create.status, code: create.body?.status?.code ?? create.status, ...create.body }
+      });
+    }
+
     const createdAt = convoso.created_at || convoso.call_end_time || (convosoLog?.call_date ?? convosoLog?.call_date_time) || new Date().toISOString().slice(0, 19).replace("T", " ");
 
     const durationSec = Number(convosoLog?.call_length ?? convosoLog?.call_length_seconds ?? convoso.duration ?? convoso.duration_seconds ?? 0);
@@ -345,7 +383,7 @@ app.post("/convoso/call-completed", async (req, res) => {
     const create = await forthCreateCall({
       contactID: Number(contact.id),
       created_at: createdAt,
-      ...(direction ? { call_type: direction } : {}),
+      call_type: direction,
       call_disposition: dispId,
       call_result: callResult,
       notes,
