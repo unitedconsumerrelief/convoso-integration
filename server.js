@@ -121,12 +121,22 @@ function normalizePayloadObject(raw, _inputType) {
 
 /**
  * Normalize incoming request body for POST /convoso/call-completed.
- * Accepts: params string (querystring), JSON array, JSON object, or params as array/object.
+ * Accepts: params string (querystring or JSON), JSON array, JSON object, params as array/object, or giant JSON key.
  * Returns single payload object with phone, phone_number, call_type, call_log_id, _inputType.
  */
 function normalizeIncomingPayload(req) {
   const body = req.body || {};
   if (typeof body.params === "string") {
+    const paramsStr = body.params.trim();
+    if (paramsStr.startsWith("{") && paramsStr.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(body.params);
+        console.log("[call-completed] detected params_json");
+        return normalizePayloadObject(parsed, "params_json");
+      } catch (_) {
+        // fall through to querystring
+      }
+    }
     const parsed = querystring.parse(body.params);
     const phoneNumber = String(parsed.phone_number ?? parsed.phone ?? "").trim();
     const phoneCode = String(parsed.phone_code ?? "").trim();
@@ -145,6 +155,23 @@ function normalizeIncomingPayload(req) {
   }
   if (body.params && typeof body.params === "object" && !Array.isArray(body.params)) {
     return normalizePayloadObject(body.params, "json_params_object");
+  }
+  const hasPhone = body.phone_number ?? body.phone ?? body.primary_phone;
+  if (!hasPhone && body && typeof body === "object") {
+    for (const k of Object.keys(body)) {
+      if (typeof k === "string") {
+        const trimmed = k.trim();
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+          try {
+            const parsed = JSON.parse(k);
+            console.log("[call-completed] detected giant_json_key");
+            return normalizePayloadObject(parsed, "giant_json_key");
+          } catch (_) {
+            // continue to next key
+          }
+        }
+      }
+    }
   }
   return normalizePayloadObject(body, "json_object");
 }
